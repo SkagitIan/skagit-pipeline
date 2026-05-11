@@ -94,13 +94,14 @@ function buildInsert(id, a, l, imps, sales) {
 // ── D1 REST API ───────────────────────────────────────────────────────────────
 
 async function d1Batch(statements) {
-  const res = await fetch(D1_URL, {
+  const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/d1/database/${DB_ID}/batch`;
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${CF_TOKEN}`,
       'Content-Type':  'application/json',
     },
-    body: JSON.stringify(statements.map(sql => ({ sql }))),
+    body: JSON.stringify({ statements: statements.map(sql => ({ sql })) }),
   });
   const data = await res.json();
   if (!data.success) {
