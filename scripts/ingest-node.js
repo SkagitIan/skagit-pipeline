@@ -93,22 +93,25 @@ function buildInsert(id, a, l, imps, sales) {
 
 // ── D1 REST API ───────────────────────────────────────────────────────────────
 
-async function d1Batch(statements) {
-  const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/d1/database/${DB_ID}/batch`;
+// Replace d1Batch with this:
+async function d1Query(sql) {
+  const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/d1/database/${DB_ID}/query`;
   const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${CF_TOKEN}`,
       'Content-Type':  'application/json',
     },
-    body: JSON.stringify({ statements: statements.map(sql => ({ sql })) }),
+    body: JSON.stringify({ sql }),
   });
   const data = await res.json();
-  if (!data.success) {
-    console.error('D1 batch error:', JSON.stringify(data.errors));
-    throw new Error(`D1 batch failed: ${data.errors?.[0]?.message}`);
-  }
+  if (!data.success) throw new Error(data.errors?.[0]?.message ?? 'D1 query failed');
   return data;
+}
+
+async function d1Batch(statements) {
+  // D1 REST API has no batch endpoint — run in parallel instead
+  await Promise.all(statements.map(sql => d1Query(sql)));
 }
 // ── Main ──────────────────────────────────────────────────────────────────────
 
