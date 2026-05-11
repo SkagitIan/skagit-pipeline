@@ -1,0 +1,17 @@
+{
+  "name": "skagit-pipeline",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "setup": "bash setup.sh",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "logs": "wrangler tail"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
