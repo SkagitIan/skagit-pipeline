@@ -2,7 +2,7 @@ import { runGeoEnrich }  from './lib/geo.js';
 import { handleRequest } from './lib/api.js';
 
 export default {
-  // HTTP API — all query endpoints + /admin/ingest emergency fallback
+  // HTTP API. Ingest runs through GitHub Actions, not the Worker.
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     if (req.method === 'GET' && url.pathname === '/') {

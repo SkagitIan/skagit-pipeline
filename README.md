@@ -1,6 +1,6 @@
 # Skagit County Parcel Pipeline
 
-Weekly ingest of Skagit County Assessor data -> Cloudflare D1 -> REST API.
+Weekly ingest of Skagit County Assessor data -> normalized Cloudflare D1 tables -> REST API.
 
 ## Prerequisites
 
@@ -17,9 +17,9 @@ cd skagit-pipeline
 npm run setup
 ```
 
-The Worker is live after deploy. GitHub Actions runs parcel ingest weekly Sunday at 2am PST. The Worker cron runs geo patching at 3:30am PST.
+The Worker is live after deploy. GitHub Actions runs parcel ingest weekly Sunday at 2am PST using a full D1 SQL import. The Worker cron runs geo patching at 3:30am PST.
 
-For a production repair after schema or column changes, run the `Weekly Parcel Ingest` workflow manually with `force_full=true`. That rewrites every assessor parcel instead of only changed parcels.
+For a production repair after schema or column changes, run the `Weekly Parcel Ingest` workflow manually. The workflow always uses the full SQL import path.
 
 ## Secrets
 
@@ -34,7 +34,6 @@ Worker secrets:
 
 ```bash
 wrangler secret put ANTHROPIC_API_KEY
-wrangler secret put ADMIN_INGEST_TOKEN
 ```
 
 ## One-Time Geo Backfill
@@ -57,10 +56,10 @@ GET /parcels?zoning=R1&min_value=300000&max_value=800000&limit=500
 GET /parcels?bbox=-122.5,48.3,-122.0,48.6
 GET /parcels?year_built_after=2000&min_sqft=2000&bedrooms=4
 POST /ask
-POST /admin/ingest
+POST /admin/ingest  # disabled; use GitHub Actions
 ```
 
-`/admin/ingest` is an emergency fallback and requires `X-Admin-Token`.
+`/admin/ingest` returns `410`. Ingest is intentionally kept out of the Worker because the normalized rebuild is a large D1 import job.
 
 Query params for `/parcels`:
 
@@ -68,6 +67,11 @@ Query params for `/parcels`:
 |---|---|
 | `zoning` | `R1` |
 | `land_use_code` | `111` or `(111)` |
+| `situs_city` / `city` | `SEDRO WOOLLEY` |
+| `street` | `CULTUS MOUNTAIN DR` |
+| `owner_state` | `WA` |
+| `absentee_owner` | `1` |
+| `is_vacant` / `is_sfr` | `1` |
 | `min_value` / `max_value` | `300000` |
 | `year_built_after` / `year_built_before` | `1990` |
 | `min_sqft` | `1500` |
@@ -79,12 +83,19 @@ Query params for `/parcels`:
 
 ## Ingest Metadata
 
-The active GitHub ingest stores delta manifests and run summaries in D1 metadata tables:
+The active GitHub ingest stores normalized parcel data in:
+
+- `parcel_cards`
+- `parcel_sales`
+- `parcel_improvements`
+- `parcel_land_segments`
+
+It stores run metadata in:
 
 - `ingest_manifests`
 - `ingest_runs`
 
-Legacy R2 exports may exist, but they are not part of the active GitHub ingest path.
+Raw source blobs are not stored in D1. If raw snapshots are needed later, store them in R2 and keep only `raw_r2_key` in D1.
 
 ## File Structure
 
@@ -92,7 +103,7 @@ Legacy R2 exports may exist, but they are not part of the active GitHub ingest p
 src/
   worker.js          # entry point: fetch (API) + scheduled (cron)
   lib/
-    ingest.js        # emergency Worker-side ingest
+    ingest.js        # disabled Worker-side ingest stub
     geo.js           # geo patch for new parcels
     api.js           # HTTP handlers
     parse.js         # PSV parsing + key normalization
@@ -107,4 +118,4 @@ setup.sh
 
 ## Adding Data Cleaning
 
-Edit `src/lib/card.js` in `buildCard()`. That is the single place where the four source files are merged into one parcel card.
+Edit `src/lib/card.js`. That is the single place where the four source files are cleaned and converted into `parcel_cards`, `parcel_sales`, `parcel_improvements`, and `parcel_land_segments` rows.

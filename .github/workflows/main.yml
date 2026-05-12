@@ -3,15 +3,6 @@ on:
   schedule:
     - cron: '0 10 * * 0'   # Sunday 2am PST (assessor data rarely changes daily)
   workflow_dispatch:         # Manual trigger via GitHub Actions UI
-    inputs:
-      force_full:
-        description: 'Rewrite every assessor parcel to repair schema/column drift'
-        required: false
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
 
 jobs:
   ingest:
@@ -26,23 +17,13 @@ jobs:
         run: npm ci
 
       - name: Build full repair SQL
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.force_full == 'true' }}
         run: node scripts/ingest-node.js
         env:
           FORCE_FULL_REINGEST: '1'
           OUTPUT_SQL_FILE: parcel-import.sql
 
       - name: Import full repair SQL
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.force_full == 'true' }}
         run: npx wrangler d1 execute skagit-parcels --remote --file parcel-import.sql --yes
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}
-
-      - name: Run incremental ingest
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.force_full != 'true' }}
-        run: node scripts/ingest-node.js
-        env:
-          CF_ACCOUNT_ID:  ${{ secrets.CF_ACCOUNT_ID }}
-          CF_API_TOKEN:   ${{ secrets.CF_API_TOKEN }}
-          D1_DATABASE_ID: bd1fd2cb-9d82-4068-a79a-de55c83cc981
