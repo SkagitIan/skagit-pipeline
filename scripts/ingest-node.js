@@ -73,11 +73,14 @@ const CF_BASE    = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_I
 const authHeader = { Authorization: `Bearer ${CF_API_TOKEN}` };
 
 async function d1Query(statements) {
-  const payload = Array.isArray(statements) ? statements : [statements];
-  const res  = await fetch(`${CF_BASE}/d1/database/${D1_DATABASE_ID}/query`, {
-    method:  'POST',
+  if (Array.isArray(statements)) {
+    return Promise.all(statements.map(statement => d1Query(statement)));
+  }
+
+  const res = await fetch(`${CF_BASE}/d1/database/${D1_DATABASE_ID}/query`, {
+    method: 'POST',
     headers: { ...authHeader, 'Content-Type': 'application/json' },
-    body:    JSON.stringify(payload),
+    body: JSON.stringify(statements),
   });
   const data = await res.json();
   if (!res.ok || !data.success) {
