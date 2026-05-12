@@ -64,10 +64,31 @@ const INSERT_SQL = `INSERT OR REPLACE INTO parcel_cards
    raw_json)
   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
 
-const INSERT_COLUMNS = 20;
-const BATCH_SIZE  = 25;  // 25 rows * 20 columns = 500 params per D1 request
+const INSERT_COLUMNS = [
+  'parcel_id',
+  'updated_date',
+  'assessed_value',
+  'land_value',
+  'improvement_value',
+  'year_built',
+  'sq_ft',
+  'bedrooms',
+  'bathrooms',
+  'land_use_code',
+  'zoning',
+  'acres',
+  'improvements',
+  'sales_history',
+  'latitude',
+  'longitude',
+  'geometry',
+  'absentee_owner',
+  'days_since_last_sale',
+  'raw_json',
+];
+const BATCH_SIZE  = 50;  // One JSON parameter per batch; keep payload comfortably below D1 row/string limits.
 const DELETE_BATCH_SIZE = 100;
-const CONCURRENCY = 2;
+const CONCURRENCY = 1;   // A single D1 database processes writes serially; avoid queue overload.
 const D1_MAX_ATTEMPTS = 6;
 
 // ── Cloudflare REST API helpers ───────────────────────────────────────────────
@@ -159,13 +180,13 @@ function isRetryableD1Error(status, data) {
     errors.some(error => error?.code === 7429 || /overloaded|queued for too long/i.test(error?.message ?? ''));
 }
 
-function buildMultiRowInsert(rows) {
-  const placeholders = rows
-    .map(() => `(${Array.from({ length: INSERT_COLUMNS }, () => '?').join(',')})`)
+function buildJsonBatchInsert(rows) {
+  const selectors = INSERT_COLUMNS
+    .map((_, index) => `json_extract(value, '$[${index}]')`)
     .join(',');
   return {
-    sql: INSERT_SQL.replace('VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', `VALUES ${placeholders}`),
-    params: rows.flat(),
+    sql: `${INSERT_SQL.split('VALUES')[0]} SELECT ${selectors} FROM json_each(?)`,
+    params: [JSON.stringify(rows)],
   };
 }
 
@@ -285,7 +306,7 @@ for (let i = 0; i < idsToWrite.length; i += BATCH_SIZE) {
       );
       return cardToRow(card);
     });
-    await d1Query(buildMultiRowInsert(rows));
+    await d1Query(buildJsonBatchInsert(rows));
   });
 }
 
