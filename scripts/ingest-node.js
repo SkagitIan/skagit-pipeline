@@ -64,8 +64,11 @@ const INSERT_SQL = `INSERT OR REPLACE INTO parcel_cards
    raw_json)
   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
 
-const BATCH_SIZE  = 100;  // rows per D1 request
-const CONCURRENCY = 10;   // parallel D1 requests
+const INSERT_COLUMNS = 20;
+const BATCH_SIZE  = 25;  // 25 rows * 20 columns = 500 params per D1 request
+const DELETE_BATCH_SIZE = 100;
+const CONCURRENCY = 2;
+const D1_MAX_ATTEMPTS = 6;
 
 // ── Cloudflare REST API helpers ───────────────────────────────────────────────
 
@@ -77,16 +80,24 @@ async function d1Query(statements) {
     return Promise.all(statements.map(statement => d1Query(statement)));
   }
 
-  const res = await fetch(`${CF_BASE}/d1/database/${D1_DATABASE_ID}/query`, {
-    method: 'POST',
-    headers: { ...authHeader, 'Content-Type': 'application/json' },
-    body: JSON.stringify(statements),
-  });
-  const data = await res.json();
-  if (!res.ok || !data.success) {
-    throw new Error(`D1 query failed: ${JSON.stringify(data.errors ?? data)}`);
+  for (let attempt = 1; attempt <= D1_MAX_ATTEMPTS; attempt++) {
+    const res = await fetch(`${CF_BASE}/d1/database/${D1_DATABASE_ID}/query`, {
+      method: 'POST',
+      headers: { ...authHeader, 'Content-Type': 'application/json' },
+      body: JSON.stringify(statements),
+    });
+    const data = await res.json();
+    if (res.ok && data.success) return data.result;
+
+    const detail = JSON.stringify(data.errors ?? data);
+    if (!isRetryableD1Error(res.status, data) || attempt === D1_MAX_ATTEMPTS) {
+      throw new Error(`D1 query failed: ${detail}`);
+    }
+
+    const delay = 1000 * attempt * attempt;
+    console.warn(`[ingest] D1 busy, retrying attempt ${attempt + 1}/${D1_MAX_ATTEMPTS} after ${delay}ms: ${detail}`);
+    await sleep(delay);
   }
-  return data.result;
 }
 
 async function d1First(sql, params = []) {
@@ -141,6 +152,23 @@ async function putRunSummary(date, summary) {
   });
 }
 
+function isRetryableD1Error(status, data) {
+  const errors = data?.errors ?? [];
+  return status === 429 ||
+    status >= 500 ||
+    errors.some(error => error?.code === 7429 || /overloaded|queued for too long/i.test(error?.message ?? ''));
+}
+
+function buildMultiRowInsert(rows) {
+  const placeholders = rows
+    .map(() => `(${Array.from({ length: INSERT_COLUMNS }, () => '?').join(',')})`)
+    .join(',');
+  return {
+    sql: INSERT_SQL.replace('VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', `VALUES ${placeholders}`),
+    params: rows.flat(),
+  };
+}
+
 // ── Concurrency pool ──────────────────────────────────────────────────────────
 
 async function runPool(tasks, concurrency) {
@@ -151,6 +179,8 @@ async function runPool(tasks, concurrency) {
     }),
   );
 }
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -247,15 +277,15 @@ const batchTasks = [];
 for (let i = 0; i < idsToWrite.length; i += BATCH_SIZE) {
   const chunk = idsToWrite.slice(i, i + BATCH_SIZE);
   batchTasks.push(async () => {
-    const statements = chunk.map(id => {
+    const rows = chunk.map(id => {
       const card = buildCard(
         id, assessorIdx[id], landIdx[id],
         impsIdx[id] ?? [], salesIdx[id] ?? [],
         date,
       );
-      return { sql: INSERT_SQL, params: cardToRow(card) };
+      return cardToRow(card);
     });
-    await d1Query(statements);
+    await d1Query(buildMultiRowInsert(rows));
   });
 }
 
@@ -266,8 +296,8 @@ console.log(`[ingest] wrote ${idsToWrite.length} parcel cards`);
 const deletedIds = deltas.assessor?.deleted ?? [];
 if (deletedIds.length) {
   const deleteTasks = [];
-  for (let i = 0; i < deletedIds.length; i += BATCH_SIZE) {
-    const chunk        = deletedIds.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < deletedIds.length; i += DELETE_BATCH_SIZE) {
+    const chunk        = deletedIds.slice(i, i + DELETE_BATCH_SIZE);
     const placeholders = chunk.map(() => '?').join(',');
     deleteTasks.push(() =>
       d1Query({ sql: `DELETE FROM parcel_cards WHERE parcel_id IN (${placeholders})`, params: chunk }),
