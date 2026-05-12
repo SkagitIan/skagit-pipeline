@@ -67,7 +67,7 @@ Skagit County website (ZIP daily)
 |------|---------|
 | `public/index.html` | Static home page and chat UI for the parcel agent. Calls same-origin `/health` and `POST /ask`, renders answer/SQL/results, and stores previous questions/answers in browser `localStorage`. |
 | `public/ask.html` | Compatibility redirect to `/` for the old prototype URL. |
-| `wrangler.toml` | Uses `[assets] directory = "./public"` with Worker-first routing for API endpoints (`/health`, `/parcel/*`, `/parcels`, `/ask`, `/admin/*`). |
+| `wrangler.toml` | Uses `[assets] directory = "./public"` with `html_handling = "none"` and Worker-first routing for API endpoints (`/health`, `/parcel/*`, `/parcels`, `/ask`, `/admin/*`). |
 
 ### Config & scripts
 
