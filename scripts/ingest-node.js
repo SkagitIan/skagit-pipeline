@@ -11,7 +11,7 @@
  */
 
 import { unzipSync, strFromU8 } from 'fflate';
-import { readFileSync, existsSync } from 'node:fs';
+import { createWriteStream, readFileSync, existsSync } from 'node:fs';
 import { resolve }                  from 'node:path';
 import { parsePSV, indexBy, groupBy } from '../src/lib/parse.js';
 import { computeDelta }               from '../src/lib/delta.js';
@@ -38,15 +38,22 @@ const {
   CF_API_TOKEN   = '',
   D1_DATABASE_ID = 'bd1fd2cb-9d82-4068-a79a-de55c83cc981',
   FORCE_FULL_REINGEST = '',
+  OUTPUT_SQL_FILE = '',
 } = process.env;
 
-if (!CF_ACCOUNT_ID || !CF_API_TOKEN) {
+const outputSqlFile = OUTPUT_SQL_FILE.trim();
+
+if (!outputSqlFile && (!CF_ACCOUNT_ID || !CF_API_TOKEN)) {
   console.error('ERROR: CF_ACCOUNT_ID and CF_API_TOKEN must be set');
   process.exit(1);
 }
 
 const SOURCE    = 'https://www.skagitcounty.net/Assessor/Documents/DataDownloads/SkagitAssessmentData.zip';
 const forceFull = FORCE_FULL_REINGEST === '1' || FORCE_FULL_REINGEST.toLowerCase() === 'true';
+if (outputSqlFile && !forceFull) {
+  console.error('ERROR: OUTPUT_SQL_FILE mode requires FORCE_FULL_REINGEST=1');
+  process.exit(1);
+}
 
 const FILE_MAP = {
   'AssessorData.txt': 'assessor',
@@ -147,7 +154,7 @@ async function ensureMetadataTables() {
 }
 
 async function getManifest(name) {
-  if (forceFull) return null;
+  if (forceFull || outputSqlFile) return null;
   const row = await d1First(
     'SELECT manifest_json FROM ingest_manifests WHERE name = ?',
     [name],
@@ -190,6 +197,72 @@ function buildJsonBatchInsert(rows) {
   };
 }
 
+function sqlLiteral(value) {
+  if (value == null) return 'NULL';
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'NULL';
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function sqlRow(values) {
+  return `(${values.map(sqlLiteral).join(',')})`;
+}
+
+function writeSqlLine(stream, line) {
+  return new Promise((resolve, reject) => {
+    stream.write(`${line}\n`, error => error ? reject(error) : resolve());
+  });
+}
+
+async function writeFullImportSql(path, ids, buildRow, deletedIds, manifests, summary) {
+  const stream = createWriteStream(path, { encoding: 'utf8' });
+
+  await writeSqlLine(stream, 'CREATE TABLE IF NOT EXISTS parcel_cards_import AS SELECT * FROM parcel_cards WHERE 0;');
+  await writeSqlLine(stream, 'DELETE FROM parcel_cards_import;');
+
+  let written = 0;
+  for (const id of ids) {
+    const row = buildRow(id);
+    await writeSqlLine(
+      stream,
+      `INSERT INTO parcel_cards_import (${INSERT_COLUMNS.join(',')}) VALUES ${sqlRow(row)};`,
+    );
+    written++;
+    if (written % 5000 === 0) console.log(`[ingest] SQL file rows written: ${written} / ${ids.length}`);
+  }
+
+  await writeSqlLine(stream, `DELETE FROM parcel_cards WHERE parcel_id NOT IN (SELECT parcel_id FROM parcel_cards_import);`);
+  if (deletedIds.length) {
+    for (let i = 0; i < deletedIds.length; i += DELETE_BATCH_SIZE) {
+      const ids = deletedIds.slice(i, i + DELETE_BATCH_SIZE).map(sqlLiteral).join(',');
+      await writeSqlLine(stream, `DELETE FROM parcel_cards WHERE parcel_id IN (${ids});`);
+    }
+  }
+
+  await writeSqlLine(stream, `INSERT OR REPLACE INTO parcel_cards (${INSERT_COLUMNS.join(',')})`);
+  await writeSqlLine(stream, `SELECT`);
+  await writeSqlLine(stream, `  i.parcel_id, i.updated_date, i.assessed_value, i.land_value, i.improvement_value,`);
+  await writeSqlLine(stream, `  i.year_built, i.sq_ft, i.bedrooms, i.bathrooms, i.land_use_code, i.zoning, i.acres,`);
+  await writeSqlLine(stream, `  i.improvements, i.sales_history, COALESCE(p.latitude, i.latitude), COALESCE(p.longitude, i.longitude),`);
+  await writeSqlLine(stream, `  COALESCE(p.geometry, i.geometry), i.absentee_owner, i.days_since_last_sale, i.raw_json`);
+  await writeSqlLine(stream, `FROM parcel_cards_import i LEFT JOIN parcel_cards p ON p.parcel_id = i.parcel_id;`);
+  await writeSqlLine(stream, `DROP TABLE parcel_cards_import;`);
+
+  await writeSqlLine(stream, `CREATE TABLE IF NOT EXISTS ingest_manifests (name TEXT PRIMARY KEY, updated_date TEXT, manifest_json TEXT NOT NULL);`);
+  await writeSqlLine(stream, `CREATE TABLE IF NOT EXISTS ingest_runs (run_date TEXT PRIMARY KEY, summary_json TEXT NOT NULL);`);
+  for (const { name, manifest } of manifests) {
+    await writeSqlLine(
+      stream,
+      `INSERT OR REPLACE INTO ingest_manifests (name, updated_date, manifest_json) VALUES (${sqlLiteral(name)}, ${sqlLiteral(summary.date)}, ${sqlLiteral(JSON.stringify(manifest))});`,
+    );
+  }
+  await writeSqlLine(
+    stream,
+    `INSERT OR REPLACE INTO ingest_runs (run_date, summary_json) VALUES (${sqlLiteral(summary.date)}, ${sqlLiteral(JSON.stringify(summary))});`,
+  );
+
+  await new Promise((resolve, reject) => stream.end(error => error ? reject(error) : resolve()));
+}
+
 // ── Concurrency pool ──────────────────────────────────────────────────────────
 
 async function runPool(tasks, concurrency) {
@@ -208,8 +281,9 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const date = new Date().toISOString().slice(0, 10);
 console.log(`[ingest] starting ${date}`);
 if (forceFull) console.log('[ingest] FORCE_FULL_REINGEST enabled — rewriting every assessor parcel');
+if (outputSqlFile) console.log(`[ingest] SQL import file mode enabled: ${outputSqlFile}`);
 
-await ensureMetadataTables();
+if (!outputSqlFile) await ensureMetadataTables();
 
 // 1. Download
 console.log('[ingest] downloading source zip…');
@@ -294,41 +368,16 @@ const landIdx  = indexBy(parsed.land?.rows         ?? []);
 const impsIdx  = groupBy(parsed.improvements?.rows ?? []);
 const salesIdx = groupBy(parsed.sales?.rows        ?? []);
 
-const batchTasks = [];
-for (let i = 0; i < idsToWrite.length; i += BATCH_SIZE) {
-  const chunk = idsToWrite.slice(i, i + BATCH_SIZE);
-  batchTasks.push(async () => {
-    const rows = chunk.map(id => {
-      const card = buildCard(
-        id, assessorIdx[id], landIdx[id],
-        impsIdx[id] ?? [], salesIdx[id] ?? [],
-        date,
-      );
-      return cardToRow(card);
-    });
-    await d1Query(buildJsonBatchInsert(rows));
-  });
-}
+const rowForId = id => {
+  const card = buildCard(
+    id, assessorIdx[id], landIdx[id],
+    impsIdx[id] ?? [], salesIdx[id] ?? [],
+    date,
+  );
+  return cardToRow(card);
+};
 
-await runPool(batchTasks, CONCURRENCY);
-console.log(`[ingest] wrote ${idsToWrite.length} parcel cards`);
-
-// 7. Delete parcels removed from assessor file
 const deletedIds = deltas.assessor?.deleted ?? [];
-if (deletedIds.length) {
-  const deleteTasks = [];
-  for (let i = 0; i < deletedIds.length; i += DELETE_BATCH_SIZE) {
-    const chunk        = deletedIds.slice(i, i + DELETE_BATCH_SIZE);
-    const placeholders = chunk.map(() => '?').join(',');
-    deleteTasks.push(() =>
-      d1Query({ sql: `DELETE FROM parcel_cards WHERE parcel_id IN (${placeholders})`, params: chunk }),
-    );
-  }
-  await runPool(deleteTasks, CONCURRENCY);
-  console.log(`[ingest] deleted ${deletedIds.length} removed parcels`);
-}
-
-// 8. Write run summary to D1 metadata
 const summary = {
   date,
   force_full_reingest: forceFull,
@@ -343,7 +392,40 @@ const summary = {
   ),
 };
 
-// 9. Persist manifests only after all DB writes have succeeded.
+if (outputSqlFile) {
+  await writeFullImportSql(outputSqlFile, idsToWrite, rowForId, deletedIds, nextManifests, summary);
+  console.log(`[ingest] wrote SQL import file ${outputSqlFile}`);
+  console.log('[ingest] done');
+  process.exit(0);
+}
+
+const batchTasks = [];
+for (let i = 0; i < idsToWrite.length; i += BATCH_SIZE) {
+  const chunk = idsToWrite.slice(i, i + BATCH_SIZE);
+  batchTasks.push(async () => {
+    const rows = chunk.map(rowForId);
+    await d1Query(buildJsonBatchInsert(rows));
+  });
+}
+
+await runPool(batchTasks, CONCURRENCY);
+console.log(`[ingest] wrote ${idsToWrite.length} parcel cards`);
+
+// 7. Delete parcels removed from assessor file
+if (deletedIds.length) {
+  const deleteTasks = [];
+  for (let i = 0; i < deletedIds.length; i += DELETE_BATCH_SIZE) {
+    const chunk        = deletedIds.slice(i, i + DELETE_BATCH_SIZE);
+    const placeholders = chunk.map(() => '?').join(',');
+    deleteTasks.push(() =>
+      d1Query({ sql: `DELETE FROM parcel_cards WHERE parcel_id IN (${placeholders})`, params: chunk }),
+    );
+  }
+  await runPool(deleteTasks, CONCURRENCY);
+  console.log(`[ingest] deleted ${deletedIds.length} removed parcels`);
+}
+
+// 8. Persist manifests only after all DB writes have succeeded.
 await Promise.all([
   ...nextManifests.map(({ name, manifest }) => putManifest(name, manifest, date)),
   putRunSummary(date, summary),
