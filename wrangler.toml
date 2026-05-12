@@ -5,7 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [triggers]
 # 2am PST = 10:00 UTC, 3:30am PST = 11:30 UTC
-crons = ["0 10 * * *", "30 11 * * *"]
+crons = ["30 11 * * *"]   # geo-enrich only — ingest runs in GitHub Actions
 
 [[r2_buckets]]
 binding = "PARCEL_STORE"

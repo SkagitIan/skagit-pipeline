@@ -41,3 +41,26 @@ CREATE INDEX IF NOT EXISTS idx_yearbuilt      ON parcel_cards(year_built);
 CREATE INDEX IF NOT EXISTS idx_absentee       ON parcel_cards(absentee_owner);
 CREATE INDEX IF NOT EXISTS idx_days_since_sale ON parcel_cards(days_since_last_sale);
 CREATE INDEX IF NOT EXISTS idx_latlon         ON parcel_cards(latitude, longitude);
+
+-- Geo layer enrichment — populated by scripts/backfill-geo.js (one-time + periodic refresh)
+-- Kept separate so parcel_cards ingest doesn't touch it.
+CREATE TABLE IF NOT EXISTS parcel_geo_layers (
+  parcel_id     TEXT PRIMARY KEY,
+  enriched_date TEXT,
+  layers        TEXT   -- JSON: { "layerName": { field: value, ... }, ... }
+);
+
+CREATE INDEX IF NOT EXISTS idx_geo_enriched ON parcel_geo_layers(enriched_date);
+
+-- Ingest metadata used by scripts/ingest-node.js for delta detection and run history.
+-- Keeping this in D1 avoids unofficial R2 object REST calls from GitHub Actions.
+CREATE TABLE IF NOT EXISTS ingest_manifests (
+  name          TEXT PRIMARY KEY,
+  updated_date  TEXT,
+  manifest_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ingest_runs (
+  run_date     TEXT PRIMARY KEY,
+  summary_json TEXT NOT NULL
+);

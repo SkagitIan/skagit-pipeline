@@ -1,8 +1,17 @@
-name: Nightly Parcel Ingest
+name: Weekly Parcel Ingest
 on:
   schedule:
-    - cron: '0 10 * * *'   # 2am PST
-  workflow_dispatch:         # Manual trigger button in GitHub UI
+    - cron: '0 10 * * 0'   # Sunday 2am PST (assessor data rarely changes daily)
+  workflow_dispatch:         # Manual trigger via GitHub Actions UI
+    inputs:
+      force_full:
+        description: 'Rewrite every assessor parcel to repair schema/column drift'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 jobs:
   ingest:
@@ -19,6 +28,7 @@ jobs:
       - name: Run ingest
         run: node scripts/ingest-node.js
         env:
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID:  ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN:   ${{ secrets.CF_API_TOKEN }}
           D1_DATABASE_ID: bd1fd2cb-9d82-4068-a79a-de55c83cc981
+          FORCE_FULL_REINGEST: ${{ github.event_name == 'workflow_dispatch' && inputs.force_full == 'true' }}

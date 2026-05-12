@@ -1,178 +1,297 @@
-// scripts/ingest-node.js
-// Runs in GitHub Actions (7GB RAM, no timeout).
-// Downloads Skagit zip, parses 4 PSV files, writes parcel cards to D1 via REST API.
+#!/usr/bin/env node
+/**
+ * Parcel ingest — runs in GitHub Actions (no CPU/memory/time limits).
+ * Reuses src/lib/ modules directly so field mappings stay in one place.
+ * Talks to D1 via the Cloudflare REST API.
+ *
+ * GitHub secrets required:
+ *   CF_ACCOUNT_ID   — Cloudflare account ID
+ *   CF_API_TOKEN    — API token with D1 edit permissions
+ *   D1_DATABASE_ID  — hardcoded as default, overrideable via env
+ */
 
 import { unzipSync, strFromU8 } from 'fflate';
+import { readFileSync, existsSync } from 'node:fs';
+import { resolve }                  from 'node:path';
+import { parsePSV, indexBy, groupBy } from '../src/lib/parse.js';
+import { computeDelta }               from '../src/lib/delta.js';
+import { buildCard, cardToRow }       from '../src/lib/card.js';
 
-const SOURCE       = 'https://www.skagitcounty.net/Assessor/Documents/DataDownloads/SkagitAssessmentData.zip';
-const CF_ACCOUNT   = process.env.CF_ACCOUNT_ID;
-const CF_TOKEN     = process.env.CF_API_TOKEN;
-const DB_ID        = process.env.D1_DATABASE_ID;
-const DATE         = new Date().toISOString().slice(0, 10);
-const D1_URL       = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/d1/database/${DB_ID}/query`;
+// ── Land use filter (config/land_use_filter.json) ────────────────────────────
+// Keys starting with '_' are metadata comments, ignored during filtering.
+// A missing file means: allow everything.
+const FILTER_PATH  = resolve('config/land_use_filter.json');
+const landUseFilter = existsSync(FILTER_PATH)
+  ? JSON.parse(readFileSync(FILTER_PATH, 'utf8'))
+  : null;
+if (landUseFilter) {
+  const excluded = Object.entries(landUseFilter).filter(([k, v]) => !k.startsWith('_') && v === false).length;
+  console.log(`[ingest] land use filter loaded — ${excluded} codes excluded`);
+} else {
+  console.log('[ingest] no land use filter found — all codes allowed');
+}
 
-// Map zip filenames → internal names (case-insensitive match)
+// ── Config ────────────────────────────────────────────────────────────────────
+
+const {
+  CF_ACCOUNT_ID  = '',
+  CF_API_TOKEN   = '',
+  D1_DATABASE_ID = 'bd1fd2cb-9d82-4068-a79a-de55c83cc981',
+  FORCE_FULL_REINGEST = '',
+} = process.env;
+
+if (!CF_ACCOUNT_ID || !CF_API_TOKEN) {
+  console.error('ERROR: CF_ACCOUNT_ID and CF_API_TOKEN must be set');
+  process.exit(1);
+}
+
+const SOURCE    = 'https://www.skagitcounty.net/Assessor/Documents/DataDownloads/SkagitAssessmentData.zip';
+const forceFull = FORCE_FULL_REINGEST === '1' || FORCE_FULL_REINGEST.toLowerCase() === 'true';
+
 const FILE_MAP = {
   'AssessorData.txt': 'assessor',
   'Improvements.txt': 'improvements',
   'Land.txt':         'land',
   'Sales.txt':        'sales',
 };
+const INSERT_SQL = `INSERT OR REPLACE INTO parcel_cards
+  (parcel_id, updated_date, assessed_value, land_value, improvement_value,
+   year_built, sq_ft, bedrooms, bathrooms,
+   land_use_code, zoning, acres,
+   improvements, sales_history,
+   latitude, longitude, geometry,
+   absentee_owner, days_since_last_sale,
+   raw_json)
+  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
 
-// Parcel key field name per file
-const PARCEL_KEY = {
-  assessor:     'Parcel Number',
-  sales:        'Parcel Number',
-  improvements: 'ParcelNumber',
-  land:         'ParcelNumber',
-};
+const BATCH_SIZE  = 100;  // rows per D1 request
+const CONCURRENCY = 10;   // parallel D1 requests
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Cloudflare REST API helpers ───────────────────────────────────────────────
 
-function normalizeId(raw) {
-  return raw?.replace(/[\s\-]/g, '').trim() || null;
-}
+const CF_BASE    = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}`;
+const authHeader = { Authorization: `Bearer ${CF_API_TOKEN}` };
 
-function parsePSV(text, name) {
-  const lines = text.split('\n');
-  const headers = lines[0].split('|').map(h => h.trim());
-  const keyField = PARCEL_KEY[name];
-  return lines.slice(1).filter(Boolean).map(l => {
-    const vals = l.split('|');
-    const row = Object.fromEntries(headers.map((h, i) => [h, vals[i]?.trim() ?? '']));
-    row._id = normalizeId(row[keyField]);
-    return row;
-  }).filter(r => r._id);
-}
-
-function indexBy(rows)  { return Object.fromEntries(rows.map(r => [r._id, r])); }
-function groupBy(rows)  { return rows.reduce((a, r) => { (a[r._id] ??= []).push(r); return a; }, {}); }
-
-const num = v => (v != null && v !== '') ? (+v || null) : null;
-
-function esc(v) {
-  if (v == null) return 'NULL';
-  if (typeof v === 'number') return isNaN(v) ? 'NULL' : String(v);
-  return `'${String(v).replace(/'/g, "''")}'`;
-}
-
-function buildInsert(id, a, l, imps, sales) {
-  // Derive absentee owner flag: mailing address differs from situs state/city
-  const mailingState = a?.['Mailing State'] ?? a?.MailingState ?? '';
-  const absentee = mailingState && mailingState.trim().toUpperCase() !== 'WA' ? 1 : 0;
-
-  // Days since last sale
-  const lastSaleDate = sales?.[0]?.['Sale Date'] ?? sales?.[0]?.SaleDate ?? null;
-  const daysSinceLastSale = lastSaleDate
-    ? Math.floor((Date.now() - new Date(lastSaleDate).getTime()) / 86400000)
-    : null;
-
-  const vals = [
-    esc(id),
-    esc(DATE),
-    esc(num(a?.['Total Value']      ?? a?.TotalValue)),
-    esc(num(a?.['Land Value']       ?? a?.LandValue)),
-    esc(num(a?.['Impr Value']       ?? a?.ImprValue)),
-    esc(num(a?.['Year Built']       ?? a?.YearBuilt)),
-    esc(num(a?.['Sq Ft Lot']        ?? a?.SqFtLot ?? a?.SquareFeet)),
-    esc(num(a?.Bedrooms)),
-    esc(num(a?.Bathrooms)),
-    esc(l?.['Land Use Code']        ?? l?.LandUseCode ?? null),
-    esc(l?.Zoning                   ?? null),
-    esc(num(l?.Acres)),
-    esc(JSON.stringify(imps)),
-    esc(JSON.stringify(sales)),
-    'NULL', 'NULL', 'NULL',          // latitude, longitude, geometry — filled by geo worker
-    esc(absentee),
-    esc(daysSinceLastSale),
-    esc(JSON.stringify({ assessor: a, land: l, improvements: imps, sales })),
-  ].join(',');
-
-  return `INSERT OR REPLACE INTO parcel_cards VALUES (${vals})`;
-}
-
-// ── D1 REST API ───────────────────────────────────────────────────────────────
-
-// Replace d1Batch with this:
-async function d1Query(sql) {
-  const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/d1/database/${DB_ID}/query`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${CF_TOKEN}`,
-      'Content-Type':  'application/json',
-    },
-    body: JSON.stringify({ sql }),
+async function d1Query(statements) {
+  const payload = Array.isArray(statements) ? statements : [statements];
+  const res  = await fetch(`${CF_BASE}/d1/database/${D1_DATABASE_ID}/query`, {
+    method:  'POST',
+    headers: { ...authHeader, 'Content-Type': 'application/json' },
+    body:    JSON.stringify(payload),
   });
   const data = await res.json();
-  if (!data.success) throw new Error(data.errors?.[0]?.message ?? 'D1 query failed');
-  return data;
+  if (!res.ok || !data.success) {
+    throw new Error(`D1 query failed: ${JSON.stringify(data.errors ?? data)}`);
+  }
+  return data.result;
 }
 
-async function d1Batch(statements) {
-  // D1 REST API has no batch endpoint — run in parallel instead
-  await Promise.all(statements.map(sql => d1Query(sql)));
+async function d1First(sql, params = []) {
+  const result = await d1Query({ sql, params });
+  return result?.[0]?.results?.[0] ?? null;
 }
+
+async function ensureMetadataTables() {
+  await d1Query([
+    {
+      sql: `CREATE TABLE IF NOT EXISTS ingest_manifests (
+        name TEXT PRIMARY KEY,
+        updated_date TEXT,
+        manifest_json TEXT NOT NULL
+      )`,
+      params: [],
+    },
+    {
+      sql: `CREATE TABLE IF NOT EXISTS ingest_runs (
+        run_date TEXT PRIMARY KEY,
+        summary_json TEXT NOT NULL
+      )`,
+      params: [],
+    },
+  ]);
+}
+
+async function getManifest(name) {
+  if (forceFull) return null;
+  const row = await d1First(
+    'SELECT manifest_json FROM ingest_manifests WHERE name = ?',
+    [name],
+  );
+  return row?.manifest_json ? JSON.parse(row.manifest_json) : null;
+}
+
+async function putManifest(name, manifest, date) {
+  await d1Query({
+    sql: `INSERT OR REPLACE INTO ingest_manifests
+      (name, updated_date, manifest_json)
+      VALUES (?, ?, ?)`,
+    params: [name, date, JSON.stringify(manifest)],
+  });
+}
+
+async function putRunSummary(date, summary) {
+  await d1Query({
+    sql: `INSERT OR REPLACE INTO ingest_runs
+      (run_date, summary_json)
+      VALUES (?, ?)`,
+    params: [date, JSON.stringify(summary)],
+  });
+}
+
+// ── Concurrency pool ──────────────────────────────────────────────────────────
+
+async function runPool(tasks, concurrency) {
+  const queue = [...tasks];
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+      while (queue.length) await queue.shift()();
+    }),
+  );
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-if (!CF_ACCOUNT || !CF_TOKEN || !DB_ID) {
-  console.error('Missing env: CF_ACCOUNT_ID, CF_API_TOKEN, D1_DATABASE_ID');
-  process.exit(1);
-}
+const date = new Date().toISOString().slice(0, 10);
+console.log(`[ingest] starting ${date}`);
+if (forceFull) console.log('[ingest] FORCE_FULL_REINGEST enabled — rewriting every assessor parcel');
 
-console.log(`[ingest] ${DATE} — downloading...`);
-const buf = await fetch(SOURCE).then(r => {
-  if (!r.ok) throw new Error(`Download failed: ${r.status}`);
-  return r.arrayBuffer();
-});
-console.log(`[ingest] downloaded ${(buf.byteLength / 1e6).toFixed(1)}MB`);
+await ensureMetadataTables();
 
-const unzipped = unzipSync(new Uint8Array(buf));
-const files = {};
+// 1. Download
+console.log('[ingest] downloading source zip…');
+const zipRes = await fetch(SOURCE);
+if (!zipRes.ok) { console.error(`Download failed: ${zipRes.status}`); process.exit(1); }
+const zipBuf = Buffer.from(await zipRes.arrayBuffer());
+console.log(`[ingest] downloaded ${(zipBuf.length / 1e6).toFixed(1)} MB`);
+
+// 2. Unzip
+const unzipped = unzipSync(new Uint8Array(zipBuf));
+const fileIndex = {};
 for (const [k, v] of Object.entries(unzipped)) {
   const base = k.split('/').pop();
   const name = Object.keys(FILE_MAP).find(f => f.toLowerCase() === base.toLowerCase());
-  if (name) files[FILE_MAP[name]] = strFromU8(v);
+  if (name) fileIndex[FILE_MAP[name]] = strFromU8(v);
 }
-console.log('[ingest] files:', Object.keys(files).join(', '));
-
-if (!files.assessor) {
-  console.error('[ingest] FATAL: assessor file not found. Check FILE_MAP filenames.');
-  console.error('[ingest] Found:', Object.keys(unzipped).map(k => k.split('/').pop()).join(', '));
-  process.exit(1);
+console.log(`[ingest] found files: ${Object.keys(fileIndex).join(', ')}`);
+if (Object.keys(fileIndex).length < 4) {
+  console.warn(`[ingest] WARNING: expected 4 files, got ${Object.keys(fileIndex).length}`);
 }
 
-const assessorRows     = parsePSV(files.assessor,     'assessor');
-const landRows         = parsePSV(files.land,         'land');
-const improvementRows  = parsePSV(files.improvements, 'improvements');
-const salesRows        = parsePSV(files.sales,        'sales');
+// 3. Parse
+const parsed = {};
+for (const [name, text] of Object.entries(fileIndex)) {
+  parsed[name] = parsePSV(text, name);
+  console.log(`[ingest] ${name}: ${parsed[name].rows.length} rows`);
+}
 
-const assessorIdx  = indexBy(assessorRows);
-const landIdx      = indexBy(landRows);
-const impsIdx      = groupBy(improvementRows);
-const salesIdx     = groupBy(salesRows);
+// 4. Delta — compare against D1 manifests from last run
+const deltas = {};
+const nextManifests = [];
 
-const ids = Object.keys(assessorIdx);
-console.log(`[ingest] ${ids.length} parcels, ${improvementRows.length} improvements, ${salesRows.length} sales`);
-
-const BATCH = 50;
-let written = 0;
-let errors  = 0;
-
-for (let i = 0; i < ids.length; i += BATCH) {
-  const chunk = ids.slice(i, i + BATCH);
-  const stmts = chunk.map(id =>
-    buildInsert(id, assessorIdx[id], landIdx[id], impsIdx[id] ?? [], salesIdx[id] ?? [])
+for (const name of Object.keys(parsed)) {
+  const prevManifest = await getManifest(name);
+  const { delta, manifest } = computeDelta(prevManifest, parsed[name].rows, parsed[name].headers);
+  deltas[name] = delta;
+  console.log(
+    `[ingest] ${name} delta: +${delta.added.length} ~${delta.modified.length}` +
+    ` -${delta.deleted.length} schema_changed=${delta.schemaChanged}`,
   );
-  try {
-    await d1Batch(stmts);
-    written += chunk.length;
-  } catch (e) {
-    console.error(`[ingest] batch error at ${i}:`, e.message);
-    errors++;
-    if (errors > 10) { console.error('[ingest] too many errors, aborting'); process.exit(1); }
-  }
-  if (written % 5000 === 0) console.log(`[ingest] ${written} / ${ids.length}`);
+  nextManifests.push({ name, manifest });
 }
 
-console.log(`[ingest] ✓ wrote ${written} parcel cards (${errors} batch errors)`);
+// 5. Determine which parcel IDs need writing
+const dirtyIds = new Set([
+  ...(deltas.assessor?.added        ?? []),
+  ...(deltas.assessor?.modified     ?? []),
+  ...(deltas.land?.added            ?? []),
+  ...(deltas.land?.modified         ?? []),
+  ...(deltas.improvements?.added    ?? []),
+  ...(deltas.improvements?.modified ?? []),
+  ...(deltas.sales?.added           ?? []),
+  ...(deltas.sales?.modified        ?? []),
+]);
+
+const assessorIdx = indexBy(parsed.assessor?.rows ?? []);
+
+if (deltas.assessor?.schemaChanged) {
+  console.log('[ingest] assessor schema changed — forcing full rewrite');
+  for (const id of Object.keys(assessorIdx)) dirtyIds.add(id);
+}
+if (forceFull) {
+  for (const id of Object.keys(assessorIdx)) dirtyIds.add(id);
+}
+
+const idsToWrite = [...dirtyIds].filter(id => {
+  if (!assessorIdx[id]) return false;
+  const a = assessorIdx[id];
+  if (+(a['Assessed Value'] ?? 0) <= 0) return false;
+  if (a['PropType'] === 'P') return false;           // skip personal property
+  if (landUseFilter) {
+    const code = (a['Land Use'] ?? '').trim();
+    if (code && landUseFilter[code] === false) return false;
+  }
+  return true;
+});
+
+console.log(`[ingest] parcels to write: ${idsToWrite.length} of ${Object.keys(assessorIdx).length} total`);
+
+// 6. Write dirty parcels to D1 in parallel batches
+const landIdx  = indexBy(parsed.land?.rows         ?? []);
+const impsIdx  = groupBy(parsed.improvements?.rows ?? []);
+const salesIdx = groupBy(parsed.sales?.rows        ?? []);
+
+const batchTasks = [];
+for (let i = 0; i < idsToWrite.length; i += BATCH_SIZE) {
+  const chunk = idsToWrite.slice(i, i + BATCH_SIZE);
+  batchTasks.push(async () => {
+    const statements = chunk.map(id => {
+      const card = buildCard(
+        id, assessorIdx[id], landIdx[id],
+        impsIdx[id] ?? [], salesIdx[id] ?? [],
+        date,
+      );
+      return { sql: INSERT_SQL, params: cardToRow(card) };
+    });
+    await d1Query(statements);
+  });
+}
+
+await runPool(batchTasks, CONCURRENCY);
+console.log(`[ingest] wrote ${idsToWrite.length} parcel cards`);
+
+// 7. Delete parcels removed from assessor file
+const deletedIds = deltas.assessor?.deleted ?? [];
+if (deletedIds.length) {
+  const deleteTasks = [];
+  for (let i = 0; i < deletedIds.length; i += BATCH_SIZE) {
+    const chunk        = deletedIds.slice(i, i + BATCH_SIZE);
+    const placeholders = chunk.map(() => '?').join(',');
+    deleteTasks.push(() =>
+      d1Query({ sql: `DELETE FROM parcel_cards WHERE parcel_id IN (${placeholders})`, params: chunk }),
+    );
+  }
+  await runPool(deleteTasks, CONCURRENCY);
+  console.log(`[ingest] deleted ${deletedIds.length} removed parcels`);
+}
+
+// 8. Write run summary to D1 metadata
+const summary = {
+  date,
+  force_full_reingest: forceFull,
+  parcels_written: idsToWrite.length,
+  parcels_deleted: deletedIds.length,
+  total_in_assessor: Object.keys(assessorIdx).length,
+  deltas: Object.fromEntries(
+    Object.entries(deltas).map(([name, d]) => [
+      name,
+      { added: d.added.length, modified: d.modified.length, deleted: d.deleted.length, schema_changed: d.schemaChanged },
+    ]),
+  ),
+};
+
+// 9. Persist manifests only after all DB writes have succeeded.
+await Promise.all([
+  ...nextManifests.map(({ name, manifest }) => putManifest(name, manifest, date)),
+  putRunSummary(date, summary),
+]);
+console.log('[ingest] done');

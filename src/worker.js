@@ -1,20 +1,17 @@
-import { runIngest }     from './lib/ingest.js';
 import { runGeoEnrich }  from './lib/geo.js';
 import { handleRequest } from './lib/api.js';
 
 export default {
-  // HTTP API
-  async fetch(req, env,ctx) {
+  // HTTP API — all query endpoints + /admin/ingest emergency fallback
+  async fetch(req, env, ctx) {
     return handleRequest(req, env, ctx);
   },
 
   // Cron triggers
+  // Note: ingest runs in GitHub Actions (scripts/ingest-node.js), NOT here.
   async scheduled(event, env, ctx) {
-    if (event.cron === '0 10 * * *') {
-      ctx.waitUntil(runIngest(env));
-    }
     if (event.cron === '30 11 * * *') {
-      ctx.waitUntil(runGeoEnrich(env));
+      ctx.waitUntil(runGeoEnrich(env));  // backfill lat/lon for new parcels
     }
   },
 };
