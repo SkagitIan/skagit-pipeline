@@ -61,6 +61,14 @@ Skagit County website (ZIP daily)
 | `src/lib/geo.js` | Geo enrichment cron — backfills lat/lon from Skagit GIS ArcGIS API. Runs at 3:30am PST. |
 | `src/lib/ingest.js` | Worker-side ingest (emergency fallback via `/admin/ingest`). Requires `ADMIN_INGEST_TOKEN`; keep filters in sync with `scripts/ingest-node.js`. |
 
+### Frontend (Cloudflare static assets)
+
+| File | Purpose |
+|------|---------|
+| `public/index.html` | Static home page and chat UI for the parcel agent. Calls same-origin `/health` and `POST /ask`, renders answer/SQL/results, and stores previous questions/answers in browser `localStorage`. |
+| `public/ask.html` | Compatibility redirect to `/` for the old prototype URL. |
+| `wrangler.toml` | Uses `[assets] directory = "./public"` with Worker-first routing for API endpoints (`/health`, `/parcel/*`, `/parcels`, `/ask`, `/admin/*`). |
+
 ### Config & scripts
 
 | File | Purpose |
@@ -145,6 +153,9 @@ CREATE TABLE parcel_cards (
 ---
 
 ## API Endpoints
+
+### `GET /`
+Returns the static Skagit Parcel Agent home page from `public/index.html`.
 
 ### `GET /health`
 Returns `{ ok, parcel_count }`.

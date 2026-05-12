@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Skagit Parcel Agent</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #f7f3e8;
+      --muted: #b7c5bd;
+      --line: rgba(247, 243, 232, 0.14);
+      --panel: rgba(12, 25, 28, 0.84);
+      --panel-strong: rgba(4, 15, 18, 0.92);
+      --green: #18c37e;
+      --coral: #ff6b4a;
+      --gold: #f2c94c;
+      --blue: #4cb3ff;
+      --danger: #ff5c7a;
+      --shadow: 0 28px 80px rgba(0, 0, 0, 0.34);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 16% 18%, rgba(24, 195, 126, 0.22), transparent 30%),
+        radial-gradient(circle at 86% 12%, rgba(255, 107, 74, 0.18), transparent 26%),
+        linear-gradient(135deg, #08161a 0%, #112b28 44%, #2d1d17 100%);
+      color: var(--ink);
+      letter-spacing: 0;
+    }
+
+    button, textarea, input { font: inherit; }
+    button { border: 0; }
+
+    .shell {
+      width: min(1180px, calc(100% - 32px));
+      min-height: 100vh;
+      margin: 0 auto;
+      padding: 28px 0;
+      display: grid;
+      grid-template-columns: 310px minmax(0, 1fr);
+      gap: 18px;
+    }
+
+    .sidebar, .workspace {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .sidebar {
+      border-radius: 8px;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      min-height: calc(100vh - 56px);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .mark {
+      width: 40px;
+      height: 40px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, var(--green), var(--gold));
+      color: #071311;
+      font-weight: 900;
+    }
+
+    .brand h1 { margin: 0; font-size: 1rem; line-height: 1.15; }
+    .brand p { margin: 3px 0 0; color: var(--muted); font-size: 0.78rem; }
+
+    .intro {
+      margin: 18px 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.55;
+    }
+
+    .example-list { display: grid; gap: 8px; margin-bottom: 18px; }
+    .example {
+      min-height: 44px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid rgba(247, 243, 232, 0.13);
+      background: rgba(247, 243, 232, 0.06);
+      color: var(--ink);
+      text-align: left;
+      cursor: pointer;
+      transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+    }
+
+    .example:hover {
+      transform: translateY(-1px);
+      border-color: rgba(24, 195, 126, 0.55);
+      background: rgba(24, 195, 126, 0.13);
+    }
+
+    .history-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: auto;
+      padding-top: 16px;
+      border-top: 1px solid var(--line);
+    }
+
+    .history-head h2 {
+      margin: 0;
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+
+    .clear {
+      padding: 7px 9px;
+      border-radius: 8px;
+      color: var(--ink);
+      background: rgba(255, 107, 74, 0.14);
+      cursor: pointer;
+    }
+
+    .history {
+      margin-top: 10px;
+      display: grid;
+      gap: 8px;
+      max-height: 34vh;
+      overflow: auto;
+      padding-right: 2px;
+    }
+
+    .history button {
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      background: rgba(3, 12, 14, 0.45);
+      color: var(--ink);
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .history button:hover, .history button.active {
+      border-color: rgba(76, 179, 255, 0.55);
+      background: rgba(76, 179, 255, 0.12);
+    }
+
+    .history small { display: block; margin-top: 4px; color: var(--muted); }
+
+    .workspace {
+      border-radius: 8px;
+      display: grid;
+      grid-template-rows: auto minmax(320px, 1fr) auto;
+      min-height: calc(100vh - 56px);
+      overflow: hidden;
+    }
+
+    .topbar {
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      background: rgba(3, 12, 14, 0.36);
+    }
+
+    .topbar h2 {
+      margin: 0;
+      font-size: clamp(1.4rem, 3vw, 2.15rem);
+      line-height: 1.05;
+    }
+
+    .topbar p {
+      max-width: 560px;
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .health {
+      min-width: 150px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid rgba(24, 195, 126, 0.38);
+      background: rgba(24, 195, 126, 0.1);
+      color: var(--ink);
+      text-align: right;
+    }
+
+    .health span { display: block; color: var(--green); font-weight: 800; font-size: 0.85rem; }
+    .health small { color: var(--muted); }
+
+    .messages {
+      padding: 22px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .empty {
+      margin: auto;
+      width: min(640px, 100%);
+      text-align: center;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .empty strong {
+      display: block;
+      color: var(--ink);
+      font-size: 1.15rem;
+      margin-bottom: 8px;
+    }
+
+    .message { display: grid; gap: 8px; width: min(860px, 100%); }
+    .message.user { align-self: flex-end; max-width: 760px; }
+
+    .bubble {
+      border-radius: 8px;
+      padding: 14px 16px;
+      line-height: 1.5;
+      border: 1px solid var(--line);
+    }
+
+    .user .bubble {
+      background: linear-gradient(135deg, rgba(24, 195, 126, 0.95), rgba(13, 139, 96, 0.95));
+      color: #04120f;
+      border-color: transparent;
+      font-weight: 700;
+    }
+
+    .agent .bubble { background: rgba(3, 12, 14, 0.56); }
+
+    .meta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 0.84rem;
+      margin-top: 12px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      background: rgba(247, 243, 232, 0.07);
+      border: 1px solid var(--line);
+    }
+
+    details {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(247, 243, 232, 0.04);
+      overflow: hidden;
+    }
+
+    summary {
+      cursor: pointer;
+      padding: 11px 13px;
+      color: var(--ink);
+      font-weight: 800;
+    }
+
+    pre {
+      margin: 0;
+      padding: 12px 13px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #d8f7e9;
+      background: rgba(0, 0, 0, 0.26);
+      border-top: 1px solid var(--line);
+      font-size: 0.84rem;
+    }
+
+    .table-wrap { overflow: auto; border-top: 1px solid var(--line); }
+    table { width: 100%; border-collapse: collapse; min-width: 760px; font-size: 0.84rem; }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(247, 243, 232, 0.09);
+      text-align: left;
+      vertical-align: top;
+    }
+    th { color: var(--gold); background: rgba(0, 0, 0, 0.2); position: sticky; top: 0; }
+
+    .composer {
+      border-top: 1px solid var(--line);
+      padding: 16px;
+      background: var(--panel-strong);
+    }
+
+    .composer-form {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: end;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 58px;
+      max-height: 190px;
+      resize: vertical;
+      border: 1px solid rgba(247, 243, 232, 0.18);
+      border-radius: 8px;
+      padding: 13px 14px;
+      color: var(--ink);
+      background: rgba(247, 243, 232, 0.08);
+      outline: none;
+    }
+
+    textarea:focus {
+      border-color: var(--green);
+      box-shadow: 0 0 0 3px rgba(24, 195, 126, 0.16);
+    }
+
+    .ask-btn {
+      min-width: 118px;
+      min-height: 58px;
+      border-radius: 8px;
+      background: var(--coral);
+      color: #210905;
+      font-weight: 900;
+      cursor: pointer;
+      transition: background 160ms ease, transform 160ms ease;
+    }
+
+    .ask-btn:hover { transform: translateY(-1px); background: #ff8065; }
+    .ask-btn:disabled { cursor: wait; transform: none; background: #6b7c76; color: #d8e0dc; }
+
+    .composer-note { margin: 9px 2px 0; color: var(--muted); font-size: 0.82rem; }
+    .error { border-color: rgba(255, 92, 122, 0.45); background: rgba(255, 92, 122, 0.1); }
+    .error strong { color: var(--danger); }
+
+    @media (max-width: 880px) {
+      .shell { grid-template-columns: 1fr; width: min(100% - 20px, 720px); padding: 10px 0; }
+      .sidebar, .workspace { min-height: auto; }
+      .history { max-height: 220px; }
+      .topbar { display: block; }
+      .health { margin-top: 14px; text-align: left; }
+    }
+
+    @media (max-width: 560px) {
+      .composer-form { grid-template-columns: 1fr; }
+      .ask-btn { width: 100%; }
+      .messages { padding: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <aside class="sidebar" aria-label="Query shortcuts and history">
+      <div class="brand">
+        <div class="mark">SK</div>
+        <div>
+          <h1>Skagit Parcel Agent</h1>
+          <p>Investor search over county parcel data</p>
+        </div>
+      </div>
+
+      <p class="intro">
+        Ask direct questions about parcel value, ownership, acreage, sale timing, use codes, or streets. The agent turns your question into a D1 query and summarizes the results.
+      </p>
+
+      <div class="example-list" aria-label="Example questions">
+        <button class="example" type="button">Find recreational lots with absentee owners under $50k</button>
+        <button class="example" type="button">Show vacant land that has not sold in 20 years</button>
+        <button class="example" type="button">Single family homes built after 2000 with 3 bedrooms</button>
+        <button class="example" type="button">Properties on CULTUS MOUNTAIN DR</button>
+      </div>
+
+      <div class="history-head">
+        <h2>Previous</h2>
+        <button class="clear" type="button" id="clearHistory">Clear</button>
+      </div>
+      <div class="history" id="history"></div>
+    </aside>
+
+    <section class="workspace" aria-label="Parcel chat">
+      <header class="topbar">
+        <div>
+          <h2>Ask the parcel database</h2>
+          <p>Use plain English. For tighter results, include limits like price, acres, city, land use, street, owner location, or years since sale.</p>
+        </div>
+        <div class="health" id="health">
+          <span>Checking</span>
+          <small>Database status</small>
+        </div>
+      </header>
+
+      <div class="messages" id="messages" aria-live="polite">
+        <div class="empty">
+          <strong>No active question yet.</strong>
+          Choose an example or ask something specific about Skagit County parcels.
+        </div>
+      </div>
+
+      <footer class="composer">
+        <form class="composer-form" id="askForm">
+          <textarea id="question" rows="2" placeholder="Ask about absentee owners, vacant lots, street names, value ranges, acreage, or sale history"></textarea>
+          <button class="ask-btn" id="askButton" type="submit">Ask</button>
+        </form>
+        <p class="composer-note">Ctrl+Enter sends. SQL and sample rows are shown under each answer.</p>
+      </footer>
+    </section>
+  </main>
+
+  <script>
+    const WORKER = location.origin;
+    const STORAGE_KEY = 'skagit-parcel-agent-history';
+    const MAX_HISTORY = 20;
+
+    const form = document.getElementById('askForm');
+    const questionInput = document.getElementById('question');
+    const askButton = document.getElementById('askButton');
+    const messages = document.getElementById('messages');
+    const historyEl = document.getElementById('history');
+    const healthEl = document.getElementById('health');
+    const clearHistory = document.getElementById('clearHistory');
+
+    let history = loadHistory();
+    let activeId = history[0]?.id ?? null;
+
+    renderHistory();
+    if (activeId) renderConversation(history.find(item => item.id === activeId));
+    checkHealth();
+
+    document.querySelectorAll('.example').forEach(button => {
+      button.addEventListener('click', () => {
+        questionInput.value = button.textContent.trim();
+        questionInput.focus();
+      });
+    });
+
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      ask();
+    });
+
+    questionInput.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        ask();
+      }
+    });
+
+    clearHistory.addEventListener('click', () => {
+      history = [];
+      activeId = null;
+      saveHistory();
+      renderHistory();
+      renderEmpty();
+    });
+
+    async function ask() {
+      const question = questionInput.value.trim();
+      if (!question || askButton.disabled) return;
+
+      const pending = {
+        id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+        question,
+        createdAt: new Date().toISOString(),
+        loading: true
+      };
+
+      activeId = pending.id;
+      questionInput.value = '';
+      history = [pending, ...history].slice(0, MAX_HISTORY);
+      renderHistory();
+      renderConversation(pending);
+      setLoading(true);
+
+      try {
+        const res = await fetch(`${WORKER}/ask`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question })
+        });
+        const data = await res.json();
+        const completed = { ...pending, loading: false, ok: res.ok && !data.error, data };
+        replaceHistoryItem(completed);
+        renderConversation(completed);
+      } catch (error) {
+        const failed = {
+          ...pending,
+          loading: false,
+          ok: false,
+          data: { error: 'Network error', detail: String(error) }
+        };
+        replaceHistoryItem(failed);
+        renderConversation(failed);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    function replaceHistoryItem(item) {
+      history = history.map(existing => existing.id === item.id ? item : existing);
+      saveHistory();
+      renderHistory();
+    }
+
+    function renderConversation(item) {
+      if (!item) {
+        renderEmpty();
+        return;
+      }
+
+      const data = item.data ?? {};
+      const loadingHtml = item.loading
+        ? '<div class="message agent"><div class="bubble">Querying the parcel database...</div></div>'
+        : '';
+      const answerHtml = item.loading ? '' : renderAnswer(item, data);
+
+      messages.innerHTML = `
+        <article class="message user">
+          <div class="bubble">${esc(item.question)}</div>
+        </article>
+        ${loadingHtml}
+        ${answerHtml}
+      `;
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    function renderAnswer(item, data) {
+      if (!item.ok) {
+        return `
+          <article class="message agent">
+            <div class="bubble error">
+              <strong>${esc(data.error || 'Request failed')}</strong>
+              ${data.detail ? `<pre>${esc(data.detail)}</pre>` : ''}
+              ${data.sql ? `<pre>${esc(data.sql)}</pre>` : ''}
+            </div>
+          </article>
+        `;
+      }
+
+      const results = Array.isArray(data.results) ? data.results : [];
+      const resultsHtml = results.length ? tableHtml(results.slice(0, 50)) : '<pre>No rows returned.</pre>';
+      return `
+        <article class="message agent">
+          <div class="bubble">
+            ${esc(data.answer)}
+            <div class="meta-row">
+              <span class="pill">${Number(data.row_count || 0).toLocaleString()} rows</span>
+              <span class="pill">${formatTime(item.createdAt)}</span>
+            </div>
+          </div>
+          <details>
+            <summary>SQL and reasoning</summary>
+            <pre>${esc(data.reasoning || '')}\n\n${esc(data.sql || '')}</pre>
+          </details>
+          <details open>
+            <summary>Results sample</summary>
+            ${resultsHtml}
+          </details>
+        </article>
+      `;
+    }
+
+    function renderEmpty() {
+      messages.innerHTML = `
+        <div class="empty">
+          <strong>No active question yet.</strong>
+          Choose an example or ask something specific about Skagit County parcels.
+        </div>
+      `;
+    }
+
+    function renderHistory() {
+      if (!history.length) {
+        historyEl.innerHTML = '<button type="button" disabled>No saved questions</button>';
+        return;
+      }
+
+      historyEl.innerHTML = history.map(item => `
+        <button type="button" class="${item.id === activeId ? 'active' : ''}" data-id="${escAttr(item.id)}">
+          ${esc(truncate(item.question, 76))}
+          <small>${item.loading ? 'Running' : item.ok === false ? 'Failed' : formatTime(item.createdAt)}</small>
+        </button>
+      `).join('');
+
+      historyEl.querySelectorAll('button[data-id]').forEach(button => {
+        button.addEventListener('click', () => {
+          activeId = button.dataset.id;
+          renderHistory();
+          renderConversation(history.find(item => item.id === activeId));
+        });
+      });
+    }
+
+    async function checkHealth() {
+      try {
+        const res = await fetch(`${WORKER}/health`);
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Health check failed');
+        healthEl.innerHTML = `<span>Online</span><small>${Number(data.parcel_count || 0).toLocaleString()} parcels</small>`;
+      } catch {
+        healthEl.innerHTML = '<span style="color: var(--danger)">Offline</span><small>API unavailable</small>';
+      }
+    }
+
+    function tableHtml(rows) {
+      if (!rows.length) return '<pre>No rows returned.</pre>';
+      const priority = ['parcel_id', 'assessed_value', 'land_value', 'improvement_value', 'acres', 'absentee_owner', 'days_since_last_sale', 'land_use_code', 'year_built', 'bedrooms', 'sq_ft', 'latitude', 'longitude'];
+      const skip = new Set(['improvements', 'sales_history', 'geometry', 'raw_json']);
+      const keys = Object.keys(rows[0] || {});
+      const cols = [...priority.filter(key => keys.includes(key)), ...keys.filter(key => !priority.includes(key) && !skip.has(key))];
+
+      return `
+        <div class="table-wrap">
+          <table>
+            <thead><tr>${cols.map(col => `<th>${esc(col)}</th>`).join('')}</tr></thead>
+            <tbody>
+              ${rows.map(row => `<tr>${cols.map(col => `<td>${esc(formatCell(row[col]))}</td>`).join('')}</tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function formatCell(value) {
+      if (value === null || value === undefined) return '';
+      if (typeof value === 'number') return Number.isFinite(value) ? value.toLocaleString() : '';
+      return String(value);
+    }
+
+    function setLoading(isLoading) {
+      askButton.disabled = isLoading;
+      askButton.textContent = isLoading ? 'Running' : 'Ask';
+    }
+
+    function loadHistory() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function saveHistory() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(history.slice(0, MAX_HISTORY)));
+    }
+
+    function formatTime(iso) {
+      try {
+        return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(iso));
+      } catch {
+        return '';
+      }
+    }
+
+    function truncate(value, length) {
+      return value.length > length ? `${value.slice(0, length - 1)}...` : value;
+    }
+
+    function esc(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    function escAttr(value) {
+      return esc(value).replace(/"/g, '&quot;');
+    }
+  </script>
+</body>
+</html>

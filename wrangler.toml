@@ -3,6 +3,11 @@ main = "src/worker.js"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
+[assets]
+directory = "./public"
+not_found_handling = "none"
+run_worker_first = ["/health", "/parcel/*", "/parcels", "/ask", "/admin/*"]
+
 [triggers]
 # 2am PST = 10:00 UTC, 3:30am PST = 11:30 UTC
 crons = ["30 11 * * *"]   # geo-enrich only — ingest runs in GitHub Actions
