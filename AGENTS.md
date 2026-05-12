@@ -56,7 +56,7 @@ Skagit County website (ZIP daily)
 
 | File | Purpose |
 |------|---------|
-| `src/worker.js` | Entry point. Routes fetch → handleRequest, cron → runGeoEnrich only. |
+| `src/worker.js` | Entry point. Serves `/` from static assets, routes API fetches → handleRequest, cron → runGeoEnrich only. |
 | `src/lib/api.js` | All HTTP endpoints including `/ask` NL-to-SQL. |
 | `src/lib/geo.js` | Geo enrichment cron — backfills lat/lon from Skagit GIS ArcGIS API. Runs at 3:30am PST. |
 | `src/lib/ingest.js` | Worker-side ingest (emergency fallback via `/admin/ingest`). Requires `ADMIN_INGEST_TOKEN`; keep filters in sync with `scripts/ingest-node.js`. |
@@ -67,7 +67,7 @@ Skagit County website (ZIP daily)
 |------|---------|
 | `public/index.html` | Static home page and chat UI for the parcel agent. Calls same-origin `/health` and `POST /ask`, renders answer/SQL/results, and stores previous questions/answers in browser `localStorage`. |
 | `public/ask.html` | Compatibility redirect to `/` for the old prototype URL. |
-| `wrangler.toml` | Uses `[assets] directory = "./public"` with `html_handling = "none"` and Worker-first routing for API endpoints (`/health`, `/parcel/*`, `/parcels`, `/ask`, `/admin/*`). |
+| `wrangler.toml` | Uses `[assets] directory = "./public"` with `binding = "ASSETS"`, `html_handling = "none"`, and Worker-first routing for `/` plus API endpoints (`/health`, `/parcel/*`, `/parcels`, `/ask`, `/admin/*`). |
 
 ### Config & scripts
 

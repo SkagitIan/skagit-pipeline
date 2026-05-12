@@ -5,9 +5,10 @@ compatibility_flags = ["nodejs_compat"]
 
 [assets]
 directory = "./public"
+binding = "ASSETS"
 not_found_handling = "none"
 html_handling = "none"
-run_worker_first = ["/health", "/parcel/*", "/parcels", "/ask", "/admin/*"]
+run_worker_first = ["/", "/health", "/parcel/*", "/parcels", "/ask", "/admin/*"]
 
 [triggers]
 # 2am PST = 10:00 UTC, 3:30am PST = 11:30 UTC
